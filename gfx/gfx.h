@@ -6,7 +6,7 @@
 #define _GFX_H
 #include <stdint.h>
 
-#define swap(a, b) { int16_t t = a; a = b; b = t; }
+#define gfx_swap(a, b) { int16_t t = a; a = b; b = t; }
 
 void gfx_drawPixel(int x, int y, uint16_t color);
 void gfx_drawLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1,

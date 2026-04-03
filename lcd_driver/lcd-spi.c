@@ -340,11 +340,11 @@ lcd_spi_init(void)
 
 	/* create a test image */
 	console_puts("Generating Test Image\n");
-	test_image();
+	// test_image();
 
 	/* display it on the LCD */
-	console_puts("And ... voila\n");
-	lcd_show_frame();
+	// console_puts("And ... voila\n");
+	// lcd_show_frame();
 }
 
 /*
