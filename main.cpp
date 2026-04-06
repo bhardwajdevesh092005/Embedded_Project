@@ -1,5 +1,6 @@
 extern "C" {
     #include <stdint.h>
+    #include <stdio.h>
     #include <libopencm3/stm32/rcc.h>
     #include <libopencm3/stm32/gpio.h>
     #include "usart/usart.h" 
@@ -25,7 +26,8 @@ extern "C" int _write(int file, char *ptr, int len) {
 
 #define SDRAM_BASE 0xD0000000
 #define IMG_MAX 9216 
-uint8_t* image_buffer = (uint8_t*)SDRAM_BASE;
+uint8_t* image_buffer = (uint8_t*)(SDRAM_BASE + 0x80000); // offset by 512KB for LCD buffer protection
+
 
 // 🔥 SAFETY FIX: Move Arena to 1MB offset to avoid LCD Buffer collision
 constexpr int kTensorArenaSize = 150 * 1024;
@@ -69,11 +71,21 @@ int main(void) {
     gpio_set(GPIOG, GPIO13); // LED ON AGAIN
     if (interpreter.AllocateTensors() != kTfLiteOk) {
         usart_send_string("ALLOC_FAIL\r\n");
+        gfx_fillScreen(0xF800); // RED screen means allocation failed
+        gfx_setCursor(10, 10);
+        gfx_setTextColor(0xFFFF, 0xF800);
+        gfx_puts((char*)"ALLOC_FAIL");
         while(1); 
     }
     gpio_clear(GPIOG, GPIO13); // LED OFF (If you see this, AI is READY)
 
     usart_send_string("READY_TO_RECEIVE\r\n");
+    
+    // Show green screen on init success
+    gfx_fillScreen(0x07E0); // GREEN screen means success
+    gfx_setCursor(10, 10);
+    gfx_setTextColor(0xFFFF, 0x07E0);
+    gfx_puts((char*)"AI INIT SUCCESS");
     
     TfLiteTensor* input = interpreter.input(0);
     TfLiteTensor* output = interpreter.output(0); 
@@ -81,6 +93,12 @@ int main(void) {
     int y_offset = (GFX_HEIGHT - 96) / 2;
     
     while (1) {
+        // Run a dummy inference or just clear string
+        gfx_setCursor(10, 30);
+        gfx_setTextColor(0xFFFF, 0x0000);
+        gfx_puts((char*)"WAITING FOR SERIAL INPUT ");
+        lcd_show_frame();
+
         // 1. Hunt for 0xAA
         if ((uint8_t)usart_read_char() != 0xAA) continue;
         
@@ -101,16 +119,64 @@ int main(void) {
 
         // 5. Process (LED ON)
         gpio_set(GPIOG, GPIO13);
-        // ... (Drawing and AI Invoke logic) ...
+
+        gfx_setCursor(10, 30);
+        gfx_setTextColor(0xFFFF, 0x0000);
+        gfx_puts((char*)"PROCESSING...     ");
+        lcd_show_frame();
+        
+        // Copy image_buffer to TFLite input tensor and draw to LCD (scaled by 2)
+        int draw_x_offset = (GFX_WIDTH - 192) / 2; // scale by 2 horizontally
+        int draw_y_offset = (GFX_HEIGHT - 192) / 2; // scale by 2 vertically
+
+        for (int y = 0; y < 96; y++) {
+            for (int x = 0; x < 96; x++) {
+                int i = y * 96 + x;
+                uint8_t pixel = image_buffer[i];
+                input->data.int8[i] = (int8_t)((int16_t)pixel - 128);
+                
+                // Convert 8-bit grayscale to 16-bit RGB565 correctly
+                uint16_t raw_color = ((pixel >> 3) << 11) | ((pixel >> 2) << 5) | (pixel >> 3);
+                // Cortex-M4 is Little-Endian, ILI9341 SPI expects Big-Endian pixels. Swap bytes!
+                uint16_t color = (raw_color >> 8) | (raw_color << 8);
+
+                // Draw 2x2 scaled block
+                lcd_draw_pixel(draw_x_offset + x*2, draw_y_offset + y*2, color);
+                lcd_draw_pixel(draw_x_offset + x*2 + 1, draw_y_offset + y*2, color);
+                lcd_draw_pixel(draw_x_offset + x*2, draw_y_offset + y*2 + 1, color);
+                lcd_draw_pixel(draw_x_offset + x*2 + 1, draw_y_offset + y*2 + 1, color);
+            }
+        }
+
         interpreter.Invoke();
 
         // 6. Display and Response
+        int8_t no_person_score = output->data.int8[0];
+        int8_t person_score = output->data.int8[1];
+        bool is_person = person_score > no_person_score;
+
+        char dbg_buf[64];
+        sprintf(dbg_buf, "P: %d NP: %d    ", person_score, no_person_score);
+        gfx_setCursor(10, 50);
+        gfx_setTextColor(0xFFFF, 0x0000);
+        gfx_puts(dbg_buf);
+
+        // Draw classification label nicely below the scaled image
+        gfx_setCursor(draw_x_offset, draw_y_offset + 192 + 15);
+        if (is_person) {
+            gfx_setTextColor(0x07E0, 0x0000); // Green
+            gfx_puts((char*)"PERSON      ");
+        } else {
+            gfx_setTextColor(0xF800, 0x0000); // Red
+            gfx_puts((char*)"NO PERSON   ");
+        }
+
         lcd_show_frame(); 
 
         // Send Result (Only 3 bytes: 0xBB 0x66 Result)
         usart_send_blocking(USART1, 0xBB);
         usart_send_blocking(USART1, 0x66);
-        usart_send_blocking(USART1, (output->data.int8[1] > output->data.int8[0]) ? 1 : 0);
+        usart_send_blocking(USART1, is_person ? 1 : 0);
 
         gpio_clear(GPIOG, GPIO13);
     }

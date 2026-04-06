@@ -1,6 +1,8 @@
 import cv2, serial, struct, time, numpy as np
 
 ser = serial.Serial("/dev/ttyACM0", 115200, timeout=0.1)
+ser.reset_input_buffer()
+ser.reset_output_buffer()
 cap = cv2.VideoCapture("http://172.31.75.172:8080/video")
 
 print("Waiting for STM32 'READY' signal...")
@@ -17,6 +19,9 @@ while True:
 ser.reset_input_buffer()
 
 while True:
+    # Flush the OpenCV buffer to get the freshest frame
+    for _ in range(5):
+        cap.grab()
     ret, frame = cap.read()
     if not ret: break
 
@@ -24,6 +29,9 @@ while True:
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     small = cv2.resize(gray, (96, 96))
     img_data = small.flatten().tobytes()
+
+    # Clear stale responses from STM32 before sending next frame
+    ser.reset_input_buffer()
 
     # 📤 SEND PACKET
     # Header(2) + Size(2) + Pixels(9216)
@@ -33,17 +41,21 @@ while True:
     ser.write(packet)
     ser.flush()
     print(" Sent.")
-    time.sleep(1)
-    # 📥 WAIT FOR AI RESULT (Max 1 second)
+    time.sleep(0.5)
+
+    # 📥 WAIT FOR AI RESULT (Max 5 seconds)
     start_time = time.time()
-    while (time.time() - start_time) < 1.0:
-        if ser.in_waiting >= 3:
-            rx = ser.read(ser.in_waiting)
-            if b'\xBB\x66' in rx:
-                idx = rx.find(b'\xBB\x66')
-                res = "PERSON" if rx[idx+2] == 1 else "NONE"
-                print(f"🤖 AI RESULT: {res}")
-                break
+    rx_buffer = bytearray()
+    
+    while (time.time() - start_time) < 5.0:
+        if ser.in_waiting > 0:
+            rx_buffer.extend(ser.read(ser.in_waiting))
+            if b'\xBB\x66' in rx_buffer:
+                idx = rx_buffer.find(b'\xBB\x66')
+                if idx + 2 < len(rx_buffer):
+                    res = "PERSON" if rx_buffer[idx+2] == 1 else "NONE"
+                    print(f"🤖 AI RESULT: {res}")
+                    break
     
     # Small delay to keep the loop stable
     time.sleep(5)
